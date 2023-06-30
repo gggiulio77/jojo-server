@@ -12,12 +12,10 @@ impl MouseDriver for Enigo {
 }
 
 // TODO: find a way to derive Copy/Clone
-#[derive()]
 pub struct Mouse {
     pub x_sen: u8,
     pub y_sen: u8,
-    // TODO: make this private
-    pub driver: Box<dyn MouseDriver + Send>,
+    driver: Box<dyn MouseDriver + Send>,
 }
 
 impl Default for Mouse {
@@ -39,10 +37,9 @@ impl Mouse {
         }
     }
 
-    // TODO: find a way to implement this (don't know why it does not work)
-    // pub fn mouse_move_relative(mut self, x: i32, y: i32) {
-    //     self.driver.mouse_move_relative(x, y)
-    // }
+    pub fn mouse_move_relative(&mut self, x: i32, y: i32) {
+        self.driver.mouse_move_relative(x, y)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
