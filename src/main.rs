@@ -3,7 +3,7 @@ pub mod mouse;
 
 use crate::mouse::Mouse;
 
-use handler::room;
+use handler::{multiple, single};
 use warp::Filter;
 
 #[tokio::main]
@@ -13,10 +13,17 @@ async fn main() {
 
     let mouse_filter = warp::any().map(|| Mouse::default());
 
-    let routes = warp::path("room")
+    let single_route = warp::path("single")
         .and(warp::ws())
         .and(mouse_filter)
-        .map(|ws: warp::ws::Ws, mouse| ws.on_upgrade(|socket| room(socket, mouse)));
+        .map(|ws: warp::ws::Ws, mouse| ws.on_upgrade(|socket| single(socket, mouse)));
 
-    warp::serve(routes).run(([192, 168, 0, 163], 3030)).await;
+    let multiple_route = warp::path("multiple")
+        .and(warp::ws())
+        .and(mouse_filter)
+        .map(|ws: warp::ws::Ws, mouse| ws.on_upgrade(|socket| multiple(socket, mouse)));
+
+    warp::serve(single_route.or(multiple_route))
+        .run(([192, 168, 0, 163], 3030))
+        .await;
 }
