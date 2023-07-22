@@ -26,8 +26,8 @@ pub enum ButtonState {
 
 // TODO: find a way to derive Copy/Clone
 pub struct Mouse {
-    x_sen: u8,
-    y_sen: u8,
+    x_sen: i8,
+    y_sen: i8,
     click_left: ButtonState,
     driver: Box<dyn MouseDriver + Send>,
 }
@@ -36,7 +36,7 @@ impl Default for Mouse {
     fn default() -> Mouse {
         Mouse {
             x_sen: 1,
-            y_sen: 1,
+            y_sen: -1,
             click_left: ButtonState::Idle,
             driver: Box::new(Enigo::new()),
         }
@@ -45,8 +45,8 @@ impl Default for Mouse {
 
 impl Mouse {
     pub fn new(
-        x_sen: u8,
-        y_sen: u8,
+        x_sen: i8,
+        y_sen: i8,
         // TODO: think about how to store all buttons states
         click_left: ButtonState,
         driver: Box<dyn MouseDriver + Send>,
@@ -59,7 +59,7 @@ impl Mouse {
         }
     }
 
-    pub fn sensibility(&self) -> (u8, u8) {
+    pub fn sensibility(&self) -> (i8, i8) {
         (self.x_sen, self.y_sen)
     }
 
