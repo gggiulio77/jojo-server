@@ -1,69 +1,257 @@
-use crate::mouse::{Mouse, MouseRead};
-use futures_util::StreamExt;
+use anyhow::bail;
+use std::time::Duration;
+
+use crate::button::{ButtonDriver, ButtonRead};
+use crate::{db, device, mouse, room};
+use futures_util::stream::SplitStream;
+use futures_util::{SinkExt, StreamExt};
 use log::*;
-use warp::ws::WebSocket;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
+use warp::ws::{Message, WebSocket};
 
-pub async fn multiple(ws: WebSocket, mut mouse: Mouse) {
-    let (mut _tx, mut rx) = ws.split();
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct Reads {
+    mouse_read: Option<mouse::MouseRead>,
+    button_reads: Option<Vec<ButtonRead>>,
+}
 
-    let (x_sen, y_sen) = mouse.sensibility();
+impl Reads {
+    pub fn new(
+        mouse_read: Option<mouse::MouseRead>,
+        button_reads: Option<Vec<ButtonRead>>,
+    ) -> Self {
+        Reads {
+            mouse_read,
+            button_reads,
+        }
+    }
+}
 
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+enum ClientMessage {
+    Reads(Vec<Reads>),
+    Device(device::Device),
+}
+
+pub async fn socket_handler(
+    ws: WebSocket,
+    device_id: device::DeviceId,
+    devices: db::Devices,
+    sender: crossbeam_channel::Sender<room::RoomEvent>,
+) {
+    let (mut tx, rx) = ws.split();
+    // let (timeout_tx, timeout_rx) = crossbeam_channel::unbounded::<Instant>();
+    // Timeout channel
+    let (timeout_tx, mut timeout_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    // Exit socket channel
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let exit_tx_2 = exit_tx.clone();
+
+    // Msg sender channel
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+
+    let mouse_driver = mouse::MouseDriver::default();
+    let button_driver = ButtonDriver::default();
+
+    let ping_sender = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(700));
+        loop {
+            interval.tick().await;
+            // info!("[ws]: sending ping");
+            sender_tx.send(Message::ping("")).unwrap();
+        }
+    });
+
+    let timeout_task = tokio::spawn(async move {
+        loop {
+            if let Err(_) = tokio::time::timeout(Duration::from_secs(3), async {
+                if let None = timeout_rx.recv().await {
+                    return;
+                }
+            })
+            .await
+            {
+                break;
+            }
+        }
+        exit_tx.send(()).unwrap();
+    });
+
+    let msg_sender = tokio::spawn(async move {
+        while let Some(msg) = sender_rx.recv().await {
+            match tx.send(msg).await {
+                Ok(_) => {}
+                Err(err) => {
+                    error!("[ws]: cannot send msg, err: {}", err);
+                    break;
+                }
+            };
+        }
+    });
+
+    let devices_cloned = devices.clone();
+    let sender_cloned = sender.clone();
+
+    // TODO: find a way to propagate errors
+    let read_socket = tokio::spawn(async move {
+        ws_message_handler(
+            devices_cloned,
+            rx,
+            timeout_tx,
+            exit_tx_2,
+            mouse_driver,
+            sender_cloned,
+        )
+        .await
+    });
+
+    exit_rx.recv().await.unwrap();
+
+    info!("[ws]: closing thread");
+
+    read_socket.abort();
+    ping_sender.abort();
+    timeout_task.abort();
+    msg_sender.abort();
+
+    devices.write().await.remove(&device_id, sender);
+}
+
+async fn ws_message_handler(
+    devices: db::Devices,
+    mut rx: SplitStream<WebSocket>,
+    timeout_tx: UnboundedSender<()>,
+    exit_tx_2: UnboundedSender<()>,
+    mut mouse_driver: mouse::MouseDriver,
+    sender: crossbeam_channel::Sender<room::RoomEvent>,
+) -> Result<(), anyhow::Error> {
     while let Some(result) = rx.next().await {
         let msg = match result {
             Ok(msg) => msg,
-            Err(e) => {
-                error!("websocket error: {}", e);
-                break;
+            Err(err) => {
+                error!("[ws]: message error: {}", err);
+                bail!("[ws]: message error: {}", err);
             }
         };
 
+        if msg.is_pong() {
+            // info!("[ws]: pong received from");
+            timeout_tx.send(()).unwrap();
+            continue;
+        }
+
         if msg.is_close() {
-            info!("closing socket");
+            info!("[ws]: close");
+            exit_tx_2.send(()).unwrap();
             break;
         }
 
         if msg.is_binary() {
-            match bincode::deserialize::<Vec<MouseRead>>(msg.as_bytes()) {
-                Ok(reads) => {
-                    for read in &reads {
-                        let (x_read, y_read, click_read) = read.reads();
-
-                        mouse.mouse_move_relative(x_read * x_sen as i32, y_read * y_sen as i32);
-                        if click_read {
-                            mouse.mouse_move_up(enigo::MouseButton::Left);
-                        } else {
-                            mouse.mouse_move_down(enigo::MouseButton::Left);
-                        }
-                    }
+            match bincode::deserialize::<ClientMessage>(msg.as_bytes()) {
+                Ok(client_message) => {
+                    client_message_handler(
+                        client_message,
+                        &mut mouse_driver,
+                        devices.clone(),
+                        sender.clone(),
+                    )
+                    .await
                 }
-
                 Err(err) => {
-                    error!("websocket error: {}", err);
-                    break;
+                    error!("[ws]: binary error: {}", err);
+                    bail!("[ws]: binary error: {}", err);
                 }
             }
         }
 
         if msg.is_text() {
-            match serde_json::from_str::<Vec<MouseRead>>(msg.to_str().unwrap()) {
-                Ok(reads) => {
-                    for read in &reads {
-                        let (x_read, y_read, click_read) = read.reads();
-
-                        mouse.mouse_move_relative(x_read * x_sen as i32, y_read * y_sen as i32);
-                        if click_read {
-                            mouse.mouse_move_up(enigo::MouseButton::Left);
-                        } else {
-                            mouse.mouse_move_down(enigo::MouseButton::Left);
-                        }
-                    }
+            match serde_json::from_str::<ClientMessage>(msg.to_str().unwrap()) {
+                Ok(client_message) => {
+                    client_message_handler(
+                        client_message,
+                        &mut mouse_driver,
+                        devices.clone(),
+                        sender.clone(),
+                    )
+                    .await
                 }
-
                 Err(err) => {
-                    error!("websocket error: {}", err);
-                    break;
+                    error!("[ws]: text error: {}", err);
+                    bail!("[ws]: text error: {}", err);
                 }
             }
         }
+    }
+    Ok(())
+}
+
+async fn client_message_handler(
+    client_message: ClientMessage,
+    mouse_driver: &mut mouse::MouseDriver,
+    devices: db::Devices,
+    sender: crossbeam_channel::Sender<room::RoomEvent>,
+) {
+    match client_message {
+        ClientMessage::Reads(reads) => {
+            info!("[ws]: evaluating reads");
+            for read in &reads {
+                if let Some(mouse_read) = read.mouse_read {
+                    info!("[ws]: mouse read");
+                    let (x_read, y_read) = (mouse_read.x_read(), mouse_read.y_read());
+                    mouse_driver.mouse_move_relative(x_read, y_read);
+                }
+                if let Some(button_reads) = &read.button_reads {
+                    for button_read in button_reads {
+                        // TODO: do something
+                    }
+                }
+            }
+        }
+        ClientMessage::Device(device) => {
+            info!("[ws]: saving device {}", device.id());
+
+            devices
+                .write()
+                .await
+                .insert(device.id(), device, sender.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mouse;
+    use uuid::uuid;
+
+    #[test]
+    fn test_serialize_message() {
+        let device_msg = r#"{"Device": {"id": "340917e8-87a9-455c-9645-d08eb99162f9","name": "tu_vieja","mouse_config": null,"buttons": []}}"#;
+        let reads_msg =
+            r#"{"Reads": [{"mouse_read": {"x_read": 100, "y_read": 100}, "button_reads": null}]}"#;
+        let id = uuid!("340917e8-87a9-455c-9645-d08eb99162f9");
+
+        let device_result: ClientMessage = serde_json::from_str(device_msg).unwrap();
+        let reads_result: ClientMessage = serde_json::from_str(reads_msg).unwrap();
+
+        assert_eq!(
+            device_result,
+            ClientMessage::Device(device::Device::new(
+                id,
+                format!("tu_vieja"),
+                None,
+                Vec::new()
+            ))
+        );
+
+        assert_eq!(
+            reads_result,
+            ClientMessage::Reads(vec![Reads::new(
+                Some(mouse::MouseRead::new(100, 100)),
+                None
+            )])
+        );
     }
 }
