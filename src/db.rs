@@ -1,4 +1,3 @@
-use crate::{device, room};
 use log::*;
 use std::collections::hash_map::Keys;
 use std::collections::HashMap;
@@ -10,32 +9,41 @@ trait CustomMap<K, V>: dyn_clone::DynClone + Sync + Send {
     fn keys(&self) -> Keys<'_, K, V>;
     fn get(&self, key: &K) -> Option<&V>;
 
-    fn remove(&mut self, key: &device::DeviceId) -> Option<V>;
+    fn remove(&mut self, key: &jojo_common::device::DeviceId) -> Option<V>;
 }
 
 dyn_clone::clone_trait_object!(<K, V> CustomMap<K, V>);
 
-impl CustomMap<device::DeviceId, device::Device> for HashMap<device::DeviceId, device::Device> {
-    fn insert(&mut self, key: device::DeviceId, value: device::Device) -> Option<device::Device> {
+impl CustomMap<jojo_common::device::DeviceId, jojo_common::device::Device>
+    for HashMap<jojo_common::device::DeviceId, jojo_common::device::Device>
+{
+    fn insert(
+        &mut self,
+        key: jojo_common::device::DeviceId,
+        value: jojo_common::device::Device,
+    ) -> Option<jojo_common::device::Device> {
         HashMap::insert(self, key, value)
     }
 
-    fn keys(&self) -> Keys<'_, device::DeviceId, device::Device> {
+    fn keys(&self) -> Keys<'_, jojo_common::device::DeviceId, jojo_common::device::Device> {
         HashMap::keys(self)
     }
 
-    fn get(&self, key: &device::DeviceId) -> Option<&device::Device> {
+    fn get(&self, key: &jojo_common::device::DeviceId) -> Option<&jojo_common::device::Device> {
         HashMap::get(self, key)
     }
 
-    fn remove(&mut self, key: &device::DeviceId) -> Option<device::Device> {
+    fn remove(
+        &mut self,
+        key: &jojo_common::device::DeviceId,
+    ) -> Option<jojo_common::device::Device> {
         HashMap::remove(self, key)
     }
 }
 
 #[derive(Clone)]
 pub struct DeviceMap {
-    custom_map: Box<dyn CustomMap<device::DeviceId, device::Device>>,
+    custom_map: Box<dyn CustomMap<jojo_common::device::DeviceId, jojo_common::device::Device>>,
 }
 
 impl DeviceMap {
@@ -47,36 +55,42 @@ impl DeviceMap {
 
     pub fn insert(
         &mut self,
-        key: device::DeviceId,
-        value: device::Device,
-        sender: crossbeam_channel::Sender<room::RoomEvent>,
-    ) -> Option<device::Device> {
+        key: jojo_common::device::DeviceId,
+        value: jojo_common::device::Device,
+        sender: crossbeam_channel::Sender<jojo_common::room::RoomEvent>,
+    ) -> Option<jojo_common::device::Device> {
         info!("[DeviceMap]: insert key: {:?}, value: {:?}", key, value);
 
         sender
-            .send(room::RoomEvent::new(key.clone(), room::RoomAction::Join))
+            .send(jojo_common::room::RoomEvent::new(
+                key.clone(),
+                jojo_common::room::RoomAction::Join,
+            ))
             .unwrap();
 
         self.custom_map.insert(key, value)
     }
 
-    pub fn keys(&self) -> Keys<'_, device::DeviceId, device::Device> {
+    pub fn keys(&self) -> Keys<'_, jojo_common::device::DeviceId, jojo_common::device::Device> {
         self.custom_map.keys()
     }
 
-    pub fn get(&self, key: &device::DeviceId) -> Option<&device::Device> {
+    pub fn get(&self, key: &jojo_common::device::DeviceId) -> Option<&jojo_common::device::Device> {
         self.custom_map.get(key)
     }
 
     pub fn remove(
         &mut self,
-        key: &device::DeviceId,
-        sender: crossbeam_channel::Sender<room::RoomEvent>,
-    ) -> Option<device::Device> {
+        key: &jojo_common::device::DeviceId,
+        sender: crossbeam_channel::Sender<jojo_common::room::RoomEvent>,
+    ) -> Option<jojo_common::device::Device> {
         info!("[DeviceMap]: remove key: {:?}", key);
 
         sender
-            .send(room::RoomEvent::new(key.clone(), room::RoomAction::Leave))
+            .send(jojo_common::room::RoomEvent::new(
+                key.clone(),
+                jojo_common::room::RoomAction::Leave,
+            ))
             .unwrap();
 
         self.custom_map.remove(&key)
@@ -91,9 +105,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_device_map() {
-        let (tx, rx) = crossbeam_channel::unbounded::<room::RoomEvent>();
-        let key = device::DeviceId::new_v4();
-        let device = device::Device::default();
+        let (tx, rx) = crossbeam_channel::unbounded::<jojo_common::room::RoomEvent>();
+        let key = jojo_common::device::DeviceId::new_v4();
+        let device = jojo_common::device::Device::default();
 
         let mut device_map = DeviceMap::new();
 
@@ -106,22 +120,22 @@ mod tests {
         let insert_event = rx.recv().unwrap();
         let remove_event = rx.recv().unwrap();
 
-        assert_eq!(result, device::Device::default());
+        assert_eq!(result, jojo_common::device::Device::default());
         assert_eq!(
             insert_event,
-            room::RoomEvent::new(key, room::RoomAction::Join)
+            jojo_common::room::RoomEvent::new(key, jojo_common::room::RoomAction::Join)
         );
         assert_eq!(
             remove_event,
-            room::RoomEvent::new(key, room::RoomAction::Leave)
+            jojo_common::room::RoomEvent::new(key, jojo_common::room::RoomAction::Leave)
         );
     }
 
     #[tokio::test]
     async fn test_device_map_thread_safe() {
-        let (tx, rx) = crossbeam_channel::unbounded::<room::RoomEvent>();
-        let key = device::DeviceId::new_v4();
-        let device = device::Device::default();
+        let (tx, rx) = crossbeam_channel::unbounded::<jojo_common::room::RoomEvent>();
+        let key = jojo_common::device::DeviceId::new_v4();
+        let device = jojo_common::device::Device::default();
 
         let device_map_lock = Arc::new(RwLock::new(DeviceMap::new()));
 
@@ -137,14 +151,14 @@ mod tests {
         let insert_event = rx.recv().unwrap();
         let remove_event = rx.recv().unwrap();
 
-        assert_eq!(result, device::Device::default());
+        assert_eq!(result, jojo_common::device::Device::default());
         assert_eq!(
             insert_event,
-            room::RoomEvent::new(key, room::RoomAction::Join)
+            jojo_common::room::RoomEvent::new(key, jojo_common::room::RoomAction::Join)
         );
         assert_eq!(
             remove_event,
-            room::RoomEvent::new(key, room::RoomAction::Leave)
+            jojo_common::room::RoomEvent::new(key, jojo_common::room::RoomAction::Leave)
         );
     }
 }

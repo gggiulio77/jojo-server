@@ -1,1 +1,1 @@
-# mouse-server
+# jojo-server

@@ -11,7 +11,7 @@ pub trait MouseAdapter {
 
 impl MouseAdapter for Enigo {
     fn mouse_move_relative(&mut self, x: i32, y: i32) {
-        println!("moving mouse {x} horizontal and {y} vertical");
+        // println!("moving mouse {x} horizontal and {y} vertical");
         MouseControllable::mouse_move_relative(self, x, y)
     }
     fn mouse_move_down(&mut self, button: EnigoMouseButton) {
