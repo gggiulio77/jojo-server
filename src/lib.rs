@@ -1,5 +1,4 @@
 pub mod db;
-pub mod driver;
 pub mod handler;
 
 use handler::socket_handler;
@@ -31,11 +30,7 @@ pub async fn initialize(
         .map(|ws: warp::ws::Ws, device_id, devices, sender| {
             // TODO: receive an Receiver<Something> to liston to events on the tauri side of things
             // TODO: implement a task to listen to tauri events for our device_id, send it to the device via websockets
-            ws.on_upgrade(move |socket| async move {
-                socket_handler(socket, device_id, devices, sender).await;
-
-                info!("[ws]: closing thread");
-            })
+            ws.on_upgrade(move |socket| socket_handler(socket, device_id, devices, sender))
         });
 
     warp::serve(routes).run((ip_address, port)).await;
