@@ -53,7 +53,10 @@ pub async fn socket_handler(
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(700));
         loop {
             interval.tick().await;
-            ws_sender_tx.send(Message::ping("")).await.unwrap();
+            ws_sender_tx
+                .send(Message::ping(""))
+                .await
+                .unwrap_or_else(|_| info!("[ping_sender]: ws_sender_tx send error"));
         }
     });
 
@@ -71,7 +74,10 @@ pub async fn socket_handler(
             }
         }
         info!("[ws]: closing connection due to 3s timeout");
-        exit_tx.send(()).await.unwrap();
+        exit_tx
+            .send(())
+            .await
+            .unwrap_or_else(|_| info!("[timeout_task]: exit_tx send error"));
     });
 
     let msg_sender = tokio::spawn(async move {
@@ -102,7 +108,10 @@ pub async fn socket_handler(
         .await
     });
 
-    exit_rx.recv().await.unwrap();
+    exit_rx
+        .recv()
+        .await
+        .unwrap_or_else(|| info!("[timeout_task]: recv send error"));
 
     info!("[ws]: closing thread");
 
@@ -127,20 +136,28 @@ async fn ws_message_handler(
         let msg = match result {
             Ok(msg) => msg,
             Err(err) => {
+                // TODO: review what to do in this case, maybe we can close the socket
                 error!("[ws]: message error: {}", err);
-                bail!("[ws]: message error: {}", err);
+                Message::ping("")
+                // bail!("[ws]: message error: {}", err);
             }
         };
 
         if msg.is_pong() {
             // info!("[ws]: pong received from");
-            timeout_tx.send(()).await.unwrap();
+            timeout_tx
+                .send(())
+                .await
+                .unwrap_or_else(|_| info!("[msg.is_pong()]: timeout_tx send error"));
             continue;
         }
 
         if msg.is_close() {
             info!("[ws]: close message received");
-            exit_tx_2.send(()).await.unwrap();
+            exit_tx_2
+                .send(())
+                .await
+                .unwrap_or_else(|_| info!("[msg.is_close()]: exit_tx_2 send error"));
             break;
         }
 
@@ -156,14 +173,18 @@ async fn ws_message_handler(
                     .await
                 }
                 Err(err) => {
-                    error!("[ws]: binary error: {}", err);
-                    bail!("[ws]: binary error: {}", err);
+                    // TODO: this error exist when the payload is bad, for now we are ignoring it
+                    error!("[ws]: deserialize binary: {}", err);
+                    // bail!("[ws]: binary error: {}", err);
                 }
             }
         }
 
         if msg.is_text() {
-            match serde_json::from_str::<ClientMessage>(msg.to_str().unwrap()) {
+            match serde_json::from_str::<ClientMessage>(msg.to_str().unwrap_or_else(|_| {
+                info!("[msg.is_text()]: to_str() error");
+                ""
+            })) {
                 Ok(client_message) => {
                     client_message_handler(
                         client_message,
@@ -174,8 +195,9 @@ async fn ws_message_handler(
                     .await
                 }
                 Err(err) => {
-                    error!("[ws]: text error: {}", err);
-                    bail!("[ws]: text error: {}", err);
+                    // TODO: this error exist when the payload is bad, for now we are ignoring it
+                    error!("[ws]: deserialize text: {}", err);
+                    // bail!("[ws]: text error: {}", err);
                 }
             }
         }
@@ -219,7 +241,10 @@ async fn client_message_handler(
     sender: &crossbeam_channel::Sender<RoomEvent>,
 ) {
     match client_message {
-        ClientMessage::Reads(reads) => read_sender_tx.send(reads).await.unwrap(),
+        ClientMessage::Reads(reads) => read_sender_tx
+            .send(reads)
+            .await
+            .unwrap_or_else(|_| info!("[client_message_handler]: read_sender_tx send error")),
         ClientMessage::Device(device) => {
             // info!("[ws]: saving device {}", device.id());
             devices
