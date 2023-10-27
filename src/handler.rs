@@ -41,10 +41,10 @@ pub async fn socket_handler(
     let read_handler = tokio::spawn(async move {
         while let Some(reads) = read_sender_rx.recv().await {
             tokio::task::block_in_place(move || {
-                let duration = Instant::now();
-                info!("[read_handler]: Handling msg");
+                // let duration = Instant::now();
+                // info!("[read_handler]: Handling msg");
                 read_handler(reads);
-                info!("[read_handler]: Handed msg, {:?}", duration.elapsed());
+                // info!("[read_handler]: Handed msg, {:?}", duration.elapsed());
             });
         }
     });
