@@ -1,10 +1,10 @@
-use anyhow::bail;
+use axum::extract::ws::{Message, WebSocket};
 use std::time::Duration;
 
 use crate::db;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
-use jojo_common::button::ButtonRead;
+use jojo_common::button::ButtonAction;
 use jojo_common::device::DeviceId;
 use jojo_common::driver::button::ButtonDriver;
 use jojo_common::driver::mouse::MouseDriver;
@@ -13,8 +13,9 @@ use jojo_common::message::{ClientMessage, Reads};
 use jojo_common::room::RoomEvent;
 use log::*;
 use tokio::sync::mpsc::Sender;
-use tokio::time::Instant;
-use warp::ws::{Message, WebSocket};
+
+const TIMEOUT_MILLIS: u64 = 10_000;
+const PING_MILLIS: u64 = 5_000;
 
 pub async fn socket_handler(
     ws: WebSocket,
@@ -30,6 +31,7 @@ pub async fn socket_handler(
     // Exit socket channel
     let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel::<()>(32);
     let exit_tx_2 = exit_tx.clone();
+    let exit_tx_3 = exit_tx.clone();
 
     // Ws msg sender channel
     let (ws_sender_tx, mut ws_sender_rx) = tokio::sync::mpsc::channel::<Message>(32);
@@ -49,49 +51,6 @@ pub async fn socket_handler(
         }
     });
 
-    let ping_sender = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(700));
-        loop {
-            interval.tick().await;
-            ws_sender_tx
-                .send(Message::ping(""))
-                .await
-                .unwrap_or_else(|_| info!("[ping_sender]: ws_sender_tx send error"));
-        }
-    });
-
-    // TODO: rewrite this timeout_task, it make me sick
-    let timeout_task = tokio::spawn(async move {
-        loop {
-            if let Err(_) = tokio::time::timeout(Duration::from_secs(1), async {
-                if let None = timeout_rx.recv().await {
-                    return;
-                }
-            })
-            .await
-            {
-                break;
-            }
-        }
-        info!("[ws]: closing connection due to 3s timeout");
-        exit_tx
-            .send(())
-            .await
-            .unwrap_or_else(|_| info!("[timeout_task]: exit_tx send error"));
-    });
-
-    let msg_sender = tokio::spawn(async move {
-        while let Some(msg) = ws_sender_rx.recv().await {
-            match tx.send(msg).await {
-                Ok(_) => {}
-                Err(err) => {
-                    error!("[ws]: cannot send msg, err: {}", err);
-                    break;
-                }
-            };
-        }
-    });
-
     let devices_clone = devices.clone();
     let tauri_sender_tx_clone = tauri_sender_tx.clone();
 
@@ -106,6 +65,53 @@ pub async fn socket_handler(
             tauri_sender_tx_clone,
         )
         .await
+    });
+
+    let msg_sender = tokio::spawn(async move {
+        while let Some(msg) = ws_sender_rx.recv().await {
+            match tx.send(msg).await {
+                Ok(_) => {}
+                Err(err) => {
+                    error!("[ws]: cannot send msg, err: {}", err);
+                    exit_tx_3
+                        .send(())
+                        .await
+                        .unwrap_or_else(|_| info!("[timeout_task]: exit_tx send error"));
+                    break;
+                }
+            };
+        }
+    });
+
+    // TODO: rewrite this timeout_task, it make me sick
+    let timeout_task = tokio::spawn(async move {
+        loop {
+            if let Err(_) = tokio::time::timeout(Duration::from_millis(TIMEOUT_MILLIS), async {
+                if let Some(_) = timeout_rx.recv().await {
+                    return;
+                }
+            })
+            .await
+            {
+                break;
+            }
+        }
+        info!("[ws]: closing connection due to {TIMEOUT_MILLIS}ms timeout");
+        exit_tx
+            .send(())
+            .await
+            .unwrap_or_else(|_| info!("[timeout_task]: exit_tx send error"));
+    });
+
+    let ping_sender = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(PING_MILLIS));
+        loop {
+            interval.tick().await;
+            ws_sender_tx
+                .send(Message::Ping(vec![]))
+                .await
+                .unwrap_or_else(|_| info!("[ping_sender]: ws_sender_tx send error"));
+        }
     });
 
     exit_rx
@@ -138,66 +144,64 @@ async fn ws_message_handler(
             Err(err) => {
                 // TODO: review what to do in this case, maybe we can close the socket
                 error!("[ws]: message error: {}", err);
-                Message::ping("")
+                Message::Pong(vec![])
                 // bail!("[ws]: message error: {}", err);
             }
         };
 
-        if msg.is_pong() {
-            // info!("[ws]: pong received from");
-            timeout_tx
-                .send(())
-                .await
-                .unwrap_or_else(|_| info!("[msg.is_pong()]: timeout_tx send error"));
-            continue;
-        }
-
-        if msg.is_close() {
-            info!("[ws]: close message received");
-            exit_tx_2
-                .send(())
-                .await
-                .unwrap_or_else(|_| info!("[msg.is_close()]: exit_tx_2 send error"));
-            break;
-        }
-
-        if msg.is_binary() {
-            match bincode::deserialize::<ClientMessage>(msg.as_bytes()) {
-                Ok(client_message) => {
-                    client_message_handler(
-                        client_message,
-                        &devices,
-                        &read_sender_tx,
-                        &tauri_sender_tx,
-                    )
+        match msg {
+            Message::Pong(_) => {
+                // info!("[ws]: pong received from");
+                timeout_tx
+                    .send(())
                     .await
-                }
-                Err(err) => {
-                    // TODO: this error exist when the payload is bad, for now we are ignoring it
-                    error!("[ws]: deserialize binary: {}", err);
-                    // bail!("[ws]: binary error: {}", err);
+                    .unwrap_or_else(|_| info!("[msg.is_pong()]: timeout_tx send error"));
+            }
+            Message::Ping(_) => {
+                info!("[ws]: ping received from");
+            }
+            Message::Close(_) => {
+                info!("[ws]: close message received");
+                exit_tx_2
+                    .send(())
+                    .await
+                    .unwrap_or_else(|_| info!("[msg.is_close()]: exit_tx_2 send error"));
+                break;
+            }
+            Message::Text(message) => {
+                match serde_json::from_str::<ClientMessage>(&message) {
+                    Ok(client_message) => {
+                        client_message_handler(
+                            client_message,
+                            &devices,
+                            &read_sender_tx,
+                            &tauri_sender_tx,
+                        )
+                        .await
+                    }
+                    Err(err) => {
+                        // TODO: this error exist when the payload is bad, for now we are ignoring it
+                        error!("[ws]: deserialize text: {}", err);
+                        // bail!("[ws]: text error: {}", err);
+                    }
                 }
             }
-        }
-
-        if msg.is_text() {
-            match serde_json::from_str::<ClientMessage>(msg.to_str().unwrap_or_else(|_| {
-                info!("[msg.is_text()]: to_str() error");
-                ""
-            })) {
-                Ok(client_message) => {
-                    client_message_handler(
-                        client_message,
-                        &devices,
-                        &read_sender_tx,
-                        &tauri_sender_tx,
-                    )
-                    .await
-                }
-                Err(err) => {
-                    // TODO: this error exist when the payload is bad, for now we are ignoring it
-                    error!("[ws]: deserialize text: {}", err);
-                    // bail!("[ws]: text error: {}", err);
+            Message::Binary(message) => {
+                match bincode::deserialize::<ClientMessage>(&message) {
+                    Ok(client_message) => {
+                        client_message_handler(
+                            client_message,
+                            &devices,
+                            &read_sender_tx,
+                            &tauri_sender_tx,
+                        )
+                        .await
+                    }
+                    Err(err) => {
+                        // TODO: this error exist when the payload is bad, for now we are ignoring it
+                        error!("[ws]: deserialize binary: {}", err);
+                        // bail!("[ws]: binary error: {}", err);
+                    }
                 }
             }
         }
@@ -209,22 +213,25 @@ fn read_handler(reads: Vec<Reads>) {
     // TODO: think about re using drivers instances, instead of creating with each message
     let mut mouse_driver = MouseDriver::default();
     let mut button_driver = ButtonDriver::default();
+
     for read in &reads {
         if let Some(mouse_read) = read.mouse_read() {
             // info!("[ws]: mouse read");
             let (x_read, y_read) = (mouse_read.x_read(), mouse_read.y_read());
             mouse_driver.mouse_move_relative(x_read, y_read);
         }
-        if let Some(button_reads) = read.button_reads() {
-            for button_read in button_reads {
-                match button_read {
-                    ButtonRead::MouseButton(mouse_button) => {
-                        button_driver.mouse_button_to_state(mouse_button);
+        if let Some(button_actions) = read.button_actions() {
+            for button_action in button_actions {
+                info!("[read_handler]: {:?}", button_action);
+                match button_action {
+                    ButtonAction::MouseButton(mouse_button, state) => {
+                        button_driver
+                            .mouse_button_to_state(mouse_button.to_owned(), state.to_owned());
                     }
-                    ButtonRead::KeyboardButton(keyboard_button) => match keyboard_button {
-                        KeyboardButton::Sequence(sequence) => button_driver.key_sequence(sequence),
+                    ButtonAction::KeyboardButton(keyboard_button) => match keyboard_button {
+                        KeyboardButton::Sequence(sequence) => button_driver.key_sequence(&sequence),
                         KeyboardButton::SequenceDsl(sequence) => {
-                            button_driver.key_sequence_dsl(sequence)
+                            button_driver.key_sequence_dsl(&sequence)
                         }
                         KeyboardButton::Key(key) => button_driver.key_click(key.to_owned()),
                     },
