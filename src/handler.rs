@@ -2,6 +2,7 @@ use axum::extract::ws::{Message, WebSocket};
 use std::time::Duration;
 
 use crate::db;
+use futures_util::future::join_all;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use jojo_common::button::ButtonAction;
@@ -13,6 +14,7 @@ use jojo_common::message::{ClientMessage, Reads};
 use jojo_common::room::RoomEvent;
 use log::*;
 use tokio::sync::mpsc::Sender;
+use tokio::task::JoinHandle;
 
 const TIMEOUT_MILLIS: u64 = 10_000;
 const PING_MILLIS: u64 = 5_000;
@@ -42,10 +44,10 @@ pub async fn socket_handler(
     // This task is necessary because enigo was blocking all tokio tasks
     let read_handler = tokio::spawn(async move {
         while let Some(reads) = read_sender_rx.recv().await {
-            tokio::task::block_in_place(move || {
+            tokio::spawn(async move {
                 // let duration = Instant::now();
                 // info!("[read_handler]: Handling msg");
-                read_handler(reads);
+                read_handler(reads).await;
                 // info!("[read_handler]: Handed msg, {:?}", duration.elapsed());
             });
         }
@@ -209,37 +211,74 @@ async fn ws_message_handler(
     Ok(())
 }
 
-fn read_handler(reads: Vec<Reads>) {
-    // TODO: think about re using drivers instances, instead of creating with each message
-    let mut mouse_driver = MouseDriver::default();
-    let mut button_driver = ButtonDriver::default();
+async fn read_handler(reads: Vec<Reads>) {
+    let mut tasks: Vec<JoinHandle<()>> = vec![];
 
-    for read in &reads {
-        if let Some(mouse_read) = read.mouse_read() {
-            // info!("[ws]: mouse read");
-            let (x_read, y_read) = (mouse_read.x_read(), mouse_read.y_read());
-            mouse_driver.mouse_move_relative(x_read, y_read);
-        }
-        if let Some(button_actions) = read.button_actions() {
-            for button_action in button_actions {
-                info!("[read_handler]: {:?}", button_action);
-                match button_action {
-                    ButtonAction::MouseButton(mouse_button, state) => {
-                        button_driver
-                            .mouse_button_to_state(mouse_button.to_owned(), state.to_owned());
-                    }
-                    ButtonAction::KeyboardButton(keyboard_button) => match keyboard_button {
-                        KeyboardButton::Sequence(sequence) => button_driver.key_sequence(&sequence),
-                        KeyboardButton::SequenceDsl(sequence) => {
-                            button_driver.key_sequence_dsl(&sequence)
+    for read in reads {
+        // TODO: think about re using drivers instances, instead of creating with each message
+        let (mouse_read, button_actions) = (
+            read.mouse_read().to_owned(),
+            read.button_actions().to_owned(),
+        );
+
+        if let Some(mouse_read) = mouse_read {
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let mut mouse_driver = MouseDriver::default();
+                let (x_read, y_read) = (mouse_read.x_read(), mouse_read.y_read());
+
+                let mut x_total = x_read.abs();
+                let mut y_total = y_read.abs();
+
+                (0..x_total.max(y_total)).for_each(|_| {
+                    match (x_total, y_total) {
+                        (0, _) => {
+                            mouse_driver.mouse_move_relative(0, 1 * y_read.signum());
+                            y_total -= 1;
                         }
-                        KeyboardButton::Key(key) => button_driver.key_click(key.to_owned()),
-                    },
-                    _ => todo!(),
+                        (_, 0) => {
+                            mouse_driver.mouse_move_relative(1 * x_read.signum(), 0);
+                            x_total -= 1;
+                        }
+                        (_, _) => {
+                            mouse_driver
+                                .mouse_move_relative(1 * x_read.signum(), 1 * y_read.signum());
+                            y_total -= 1;
+                            x_total -= 1;
+                        }
+                    }
+                    spin_sleep::sleep(Duration::from_micros(2000));
+                });
+            }));
+        };
+
+        if let Some(button_actions) = button_actions {
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let mut button_driver = ButtonDriver::default();
+
+                for button_action in button_actions {
+                    info!("[read_handler]: {:?}", button_action);
+                    match button_action {
+                        ButtonAction::MouseButton(mouse_button, state) => {
+                            button_driver
+                                .mouse_button_to_state(mouse_button.to_owned(), state.to_owned());
+                        }
+                        ButtonAction::KeyboardButton(keyboard_button) => match keyboard_button {
+                            KeyboardButton::Sequence(sequence) => {
+                                button_driver.key_sequence(&sequence)
+                            }
+                            KeyboardButton::SequenceDsl(sequence) => {
+                                button_driver.key_sequence_dsl(&sequence)
+                            }
+                            KeyboardButton::Key(key) => button_driver.key_click(key.to_owned()),
+                        },
+                        _ => todo!(),
+                    }
                 }
-            }
+            }));
         }
     }
+
+    join_all(tasks).await;
 }
 async fn client_message_handler(
     client_message: ClientMessage,
