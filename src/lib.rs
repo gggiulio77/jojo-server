@@ -44,8 +44,11 @@ pub async fn initialize(
             )
             .with_state(shared_state);
 
-    axum::Server::bind(&(ip_address, port).into())
-        .serve(app.into_make_service())
+    let listener = tokio::net::TcpListener::bind((ip_address, port))
+        .await
+        .unwrap();
+
+    axum::serve(listener, app.into_make_service())
         .await
         .unwrap();
 }
