@@ -19,5 +19,6 @@ uuid = { version = "1.4.1", features = ["v4", "fast-rng", "serde"] }
 jojo-common = { path = "../jojo-common", features = ["driver"] }
 dyn-clone = "1.0.14"
 futures-util = "0.3.28"
-axum = { version = "0.6.20", features = ["ws"]}
+axum = { version = "0.7.1", features = ["ws"]}
 spin_sleep = "1.1.1"
+lazy_static = "1.4.0"
