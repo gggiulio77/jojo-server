@@ -12,16 +12,22 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 struct AppState {
     devices: Devices,
-    sender: crossbeam_channel::Sender<jojo_common::room::RoomEvent>,
+    server_tauri_tx: tokio::sync::mpsc::Sender<jojo_common::room::RoomEvent>,
+    tauri_client_tx: tokio::sync::broadcast::Sender<jojo_common::message::ServerMessage>,
 }
 
 pub async fn initialize(
     ip_address: Ipv4Addr,
     port: u16,
-    sender: crossbeam_channel::Sender<jojo_common::room::RoomEvent>,
+    server_tauri_tx: tokio::sync::mpsc::Sender<jojo_common::room::RoomEvent>,
+    tauri_client_tx: tokio::sync::broadcast::Sender<jojo_common::message::ServerMessage>,
 ) {
     let devices = Arc::new(RwLock::new(db::DeviceMap::new()));
-    let shared_state = AppState { devices, sender };
+    let shared_state = AppState {
+        devices,
+        server_tauri_tx,
+        tauri_client_tx,
+    };
 
     let app =
         Router::new()
@@ -36,7 +42,8 @@ pub async fn initialize(
                                 socket,
                                 id,
                                 state.devices.clone(),
-                                state.sender.clone(),
+                                state.server_tauri_tx.clone(),
+                                state.tauri_client_tx.subscribe(),
                             )
                         })
                     },

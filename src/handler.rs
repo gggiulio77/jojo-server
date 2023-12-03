@@ -17,11 +17,9 @@ use jojo_common::device::DeviceId;
 use jojo_common::driver::button::ButtonDriver;
 use jojo_common::driver::mouse::MouseDriver;
 use jojo_common::keyboard::KeyboardButton;
-use jojo_common::message::ClientMessage;
+use jojo_common::message::{ClientMessage, ServerMessage};
 use jojo_common::room::RoomEvent;
 use log::*;
-use tokio::sync::mpsc::Sender;
-
 const TIMEOUT_MILLIS: u64 = 10_000;
 const PING_MILLIS: u64 = 5_000;
 
@@ -36,7 +34,8 @@ pub async fn socket_handler(
     ws: WebSocket,
     device_id: DeviceId,
     devices: db::Devices,
-    tauri_sender_tx: crossbeam_channel::Sender<RoomEvent>,
+    server_to_tauri_tx: tokio::sync::mpsc::Sender<RoomEvent>,
+    mut tauri_to_client_rx: tokio::sync::broadcast::Receiver<ServerMessage>,
 ) {
     let (mut tx, rx) = ws.split();
 
@@ -50,9 +49,39 @@ pub async fn socket_handler(
 
     // Ws msg sender channel
     let (ws_sender_tx, mut ws_sender_rx) = tokio::sync::mpsc::channel::<Message>(32);
+    let tauri_ws_sender_tx = ws_sender_tx.clone();
 
     let devices_clone = devices.clone();
-    let tauri_sender_tx_clone = tauri_sender_tx.clone();
+    let tauri_sender_tx_clone = server_to_tauri_tx.clone();
+
+    let read_tauri = tokio::spawn(async move {
+        while let Ok(msg) = tauri_to_client_rx.recv().await {
+            match msg {
+                ServerMessage::UpdateDevice(msg_device_id, button_actions)
+                    if msg_device_id == device_id =>
+                {
+                    let message =
+                        bincode::serialize(&ServerMessage::UpdateDevice(device_id, button_actions))
+                            .expect("[read_tauri]: cannot serialize");
+
+                    tauri_ws_sender_tx
+                        .send(Message::Binary(message))
+                        .await
+                        .expect("[read_tauri]: cannot send message");
+                }
+                ServerMessage::RestartDevice(msg_device_id) if msg_device_id == device_id => {
+                    let message = bincode::serialize(&ServerMessage::RestartDevice(device_id))
+                        .expect("[read_tauri]: cannot serialize");
+
+                    tauri_ws_sender_tx
+                        .send(Message::Binary(message))
+                        .await
+                        .expect("[read_tauri]: cannot send message");
+                }
+                _ => info!("[read_tauri]: msg not for us"),
+            }
+        }
+    });
 
     // TODO: find a way to propagate errors
     let read_socket = tokio::spawn(async move {
@@ -85,12 +114,11 @@ pub async fn socket_handler(
     // TODO: rewrite this timeout_task, it make me sick
     let timeout_task = tokio::spawn(async move {
         loop {
-            if let Err(_) = tokio::time::timeout(Duration::from_millis(TIMEOUT_MILLIS), async {
-                if let Some(_) = timeout_rx.recv().await {
-                    return;
-                }
+            if tokio::time::timeout(Duration::from_millis(TIMEOUT_MILLIS), async {
+                if timeout_rx.recv().await.is_some() {}
             })
             .await
+            .is_err()
             {
                 break;
             }
@@ -103,7 +131,7 @@ pub async fn socket_handler(
     });
 
     let ping_sender = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(PING_MILLIS));
+        let mut interval = tokio::time::interval(Duration::from_millis(PING_MILLIS));
         loop {
             interval.tick().await;
             ws_sender_tx
@@ -120,20 +148,25 @@ pub async fn socket_handler(
 
     info!("[ws]: closing thread");
 
+    read_tauri.abort();
     read_socket.abort();
     ping_sender.abort();
     timeout_task.abort();
     msg_sender.abort();
 
-    devices.write().await.remove(&device_id, tauri_sender_tx);
+    devices
+        .write()
+        .await
+        .remove(&device_id, server_to_tauri_tx)
+        .await;
 }
 
 async fn ws_message_handler(
     mut rx: SplitStream<WebSocket>,
-    timeout_tx: Sender<()>,
-    exit_tx_2: Sender<()>,
+    timeout_tx: tokio::sync::mpsc::Sender<()>,
+    exit_tx_2: tokio::sync::mpsc::Sender<()>,
     devices: db::Devices,
-    tauri_sender_tx: crossbeam_channel::Sender<RoomEvent>,
+    tauri_sender_tx: tokio::sync::mpsc::Sender<RoomEvent>,
 ) -> Result<(), anyhow::Error> {
     while let Some(result) = rx.next().await {
         let msg = match result {
@@ -197,10 +230,11 @@ async fn ws_message_handler(
 async fn client_message_handler(
     client_message: ClientMessage,
     devices: &db::Devices,
-    sender: &crossbeam_channel::Sender<RoomEvent>,
+    sender: &tokio::sync::mpsc::Sender<RoomEvent>,
 ) {
     // TODO: use references for drivers, drivers are mutable, so we need a lock or channels to handle multi tasks
     // TODO: Device is an async task, but the rest of the types are sync threads, find a way to re write this
+
     match client_message {
         ClientMessage::MouseRead(mouse_read) => {
             tokio::task::spawn_blocking(move || {
@@ -217,16 +251,15 @@ async fn client_message_handler(
                 (0..max).for_each(|_| {
                     match (x_total, y_total) {
                         (0, _) => {
-                            mouse_driver.mouse_move_relative(0, 1 * y_read.signum());
+                            mouse_driver.mouse_move_relative(0, y_read.signum());
                             y_total -= 1;
                         }
                         (_, 0) => {
-                            mouse_driver.mouse_move_relative(1 * x_read.signum(), 0);
+                            mouse_driver.mouse_move_relative(x_read.signum(), 0);
                             x_total -= 1;
                         }
                         (_, _) => {
-                            mouse_driver
-                                .mouse_move_relative(1 * x_read.signum(), 1 * y_read.signum());
+                            mouse_driver.mouse_move_relative(x_read.signum(), y_read.signum());
                             y_total -= 1;
                             x_total -= 1;
                         }
@@ -312,7 +345,8 @@ async fn client_message_handler(
             devices
                 .write()
                 .await
-                .insert(device.id(), device, sender.clone());
+                .insert(device.id(), device, sender.clone())
+                .await;
         }
     }
 }
