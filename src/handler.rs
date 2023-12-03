@@ -12,6 +12,7 @@ use crate::db;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use jojo_common::button::ButtonAction;
+use jojo_common::command::{CommandDriver, CustomCommand};
 use jojo_common::device::DeviceId;
 use jojo_common::driver::button::ButtonDriver;
 use jojo_common::driver::mouse::MouseDriver;
@@ -264,7 +265,12 @@ async fn client_message_handler(
                             .lock()
                             .unwrap()
                             .gamepad_button_to_state(gamepad_button, state),
-                        ButtonAction::CustomButton(_) => todo!(),
+                        ButtonAction::CustomButton(command) => match command {
+                            CustomCommand::Binary(path) => {
+                                CommandDriver::run_binary(path)
+                                    .expect("[command_driver]: failed to run binary");
+                            }
+                        },
                     }
                 }
             })
