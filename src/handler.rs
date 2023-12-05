@@ -299,9 +299,14 @@ async fn client_message_handler(
                             .unwrap()
                             .gamepad_button_to_state(gamepad_button, state),
                         ButtonAction::CustomButton(command) => match command {
+                            // TODO: run_binary does his job, but if we want to concatenate a Keyboard command with this
+                            // a "focus" issue appears. Windows focus a program when is started from the cmd. But the timing if the program already exist and
+                            // the program never opened is different, so if we need to send a Key to this program we need to find a way to ensure that the focus
+                            // is en that program
                             CustomCommand::Binary(path) => {
                                 CommandDriver::run_binary(path)
                                     .expect("[command_driver]: failed to run binary");
+                                std::thread::sleep(Duration::from_millis(1500));
                             }
                         },
                     }
