@@ -56,6 +56,7 @@ pub async fn socket_handler(
 
     let read_tauri = tokio::spawn(async move {
         while let Ok(msg) = tauri_to_client_rx.recv().await {
+            // TODO: need refactor, doing the same thing in all cases
             match msg {
                 ServerMessage::UpdateDevice(msg_device_id, button_actions)
                     if msg_device_id == device_id =>
@@ -71,6 +72,15 @@ pub async fn socket_handler(
                 }
                 ServerMessage::RestartDevice(msg_device_id) if msg_device_id == device_id => {
                     let message = bincode::serialize(&ServerMessage::RestartDevice(device_id))
+                        .expect("[read_tauri]: cannot serialize");
+
+                    tauri_ws_sender_tx
+                        .send(Message::Binary(message))
+                        .await
+                        .expect("[read_tauri]: cannot send message");
+                }
+                ServerMessage::ClearCredentials(msg_device_id) if msg_device_id == device_id => {
+                    let message = bincode::serialize(&ServerMessage::ClearCredentials(device_id))
                         .expect("[read_tauri]: cannot serialize");
 
                     tauri_ws_sender_tx
