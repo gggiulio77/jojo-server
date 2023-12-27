@@ -2,6 +2,7 @@ use axum::extract::ws::{Message, WebSocket};
 
 use jojo_common::driver::gamepad::GamePadAdapter;
 use jojo_common::driver::gamepad::GamepadDriver;
+use jojo_common::driver::keyboard::KeyboardDriver;
 use jojo_common::gamepad::AxisRead;
 use jojo_common::gamepad::HatRead;
 use lazy_static::lazy_static;
@@ -14,7 +15,6 @@ use futures_util::{SinkExt, StreamExt};
 use jojo_common::button::ButtonAction;
 use jojo_common::command::{CommandDriver, CustomCommand};
 use jojo_common::device::DeviceId;
-use jojo_common::driver::button::ButtonDriver;
 use jojo_common::driver::mouse::MouseDriver;
 use jojo_common::keyboard::KeyboardButton;
 use jojo_common::message::{ClientMessage, ServerMessage};
@@ -25,9 +25,10 @@ const PING_MILLIS: u64 = 5_000;
 
 lazy_static! {
     // TODO: think about replace this with an Arc and passing drivers as a tuple down the functions. Or with OnceCell
-    static ref BUTTON_DRIVER_STACK: Mutex<ButtonDriver> = Mutex::new(ButtonDriver::default());
-    static ref GAMEPAD_DRIVER_STACK: Mutex<GamepadDriver> = Mutex::new(GamepadDriver::default());
+    // TODO: review a bug involving USB and vjoy, for some reason while connecting and disconnecting the esp the server loose ownership of the vjoy device and cannot upload anymore
     static ref MOUSE_DRIVER_STACK: Mutex<MouseDriver> = Mutex::new(MouseDriver::default());
+    static ref KEYBOARD_DRIVER_STACK: Mutex<KeyboardDriver> = Mutex::new(KeyboardDriver::default());
+    static ref GAMEPAD_DRIVER_STACK: Mutex<GamepadDriver> = Mutex::new(GamepadDriver::default());
 }
 
 pub async fn socket_handler(
@@ -281,30 +282,31 @@ async fn client_message_handler(
             .expect("[mouse_read]: fail case");
         }
         ClientMessage::ButtonActions(button_actions) => {
-            tokio::task::spawn_blocking(|| {
+            tokio::task::spawn_blocking(move || {
                 for button_action in button_actions {
                     info!("[client_message_handler]: {:?}", button_action);
                     match button_action {
                         ButtonAction::MouseButton(mouse_button, state) => {
-                            BUTTON_DRIVER_STACK
+                            MOUSE_DRIVER_STACK
                                 .lock()
                                 .unwrap()
                                 .mouse_button_to_state(mouse_button.to_owned(), state.to_owned());
                         }
                         ButtonAction::KeyboardButton(keyboard_button) => match keyboard_button {
-                            KeyboardButton::Sequence(sequence) => {
-                                BUTTON_DRIVER_STACK.lock().unwrap().key_sequence(&sequence)
-                            }
-                            KeyboardButton::SequenceDsl(sequence) => BUTTON_DRIVER_STACK
+                            KeyboardButton::Sequence(sequence) => KEYBOARD_DRIVER_STACK
                                 .lock()
                                 .unwrap()
-                                .key_sequence_dsl(&sequence),
-                            KeyboardButton::Key(key) => BUTTON_DRIVER_STACK
+                                .key_sequence(&sequence),
+                            KeyboardButton::SequenceDsl(sequence) => KEYBOARD_DRIVER_STACK
+                                .lock()
+                                .unwrap()
+                                .key_sequence_parse(&sequence),
+                            KeyboardButton::Key(key) => KEYBOARD_DRIVER_STACK
                                 .lock()
                                 .unwrap()
                                 .key_click(key.to_owned()),
                         },
-                        ButtonAction::GamepadButton(gamepad_button, state) => BUTTON_DRIVER_STACK
+                        ButtonAction::GamepadButton(gamepad_button, state) => GAMEPAD_DRIVER_STACK
                             .lock()
                             .unwrap()
                             .gamepad_button_to_state(gamepad_button, state),
