@@ -5,6 +5,7 @@ This repository hosts the WebSocket server component of the Jojo system. It oper
 ### Quick Links
 
 - [Getting Started](#getting-started)
+- [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Roadmap](#roadmap)
