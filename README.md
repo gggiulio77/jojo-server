@@ -1,6 +1,6 @@
 # jojo-server
 
-This repository hosts the WebSocket server component of the Jojo system. It operates on the host computer, where control over PC peripherals is desired. While it can function independently, the primary intention is to run it alongside the [jojo-app](https://github.com/gggiulio77/jojo-app) as a separate process, facilitating event-based communication between the two.
+This repository hosts the WebSocket server component of the [jojo]((https://github.com/gggiulio77/jojo)) project. It operates on the host computer, where control over PC peripherals is desired. While it can function independently, the primary intention is to run it alongside the [jojo-app](https://github.com/gggiulio77/jojo-app) as a separate process, facilitating event-based communication between the two.
 
 ### Quick Links
 
